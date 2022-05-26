@@ -20,4 +20,4 @@ So, this could be considered useful and what one can do for a company acquiring 
   + How to improve the data structure to avoid losing information.
   + How to improve data entry process to avoid accounting mistakes.
   + How to alter discount policy.
-  + How to improve decrease return rate for some products.
+  + How to decrease return rate for some products.
