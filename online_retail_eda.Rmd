@@ -1,0 +1,587 @@
+---
+title: "Online Retail EDA"
+author: "Shrief"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+``` {r environment setup, message = FALSE}
+library(tidyverse)
+library(lubridate)
+library(treemapify)
+
+data <- read_csv("online_retail.csv")
+```
+
+### Getting to be familiar with the data structure:
+
+```{r Getting familiar with the data}
+str(data)
+glimpse(data)
+```
+
+# Cleaning and understanding the data better
+
+## Date Format
+Changing the `InvoiceDate` column to a date type, and detailing it:
+
+```{r Date formatting}
+data <- data %>% 
+  mutate(InvoiceDate = mdy_hm(InvoiceDate), Month = month(InvoiceDate),
+         Day = day(InvoiceDate), DayOfWeek = weekdays(InvoiceDate),
+         Hour = hour(InvoiceDate)) %>% 
+  select(InvoiceNo, StockCode, Description, Quantity, UnitPrice, InvoiceDate,
+         Month, Day, DayOfWeek, Hour, CustomerID, Country)
+```
+
+In order to understand how clean is the data, I'll do some elementary summary statistics:
+
+## Elementary summary statistics 
+
+### Orders summary
+
+```{r orders summary}
+data %>% 
+  select(InvoiceNo, Quantity, UnitPrice) %>% 
+  group_by(InvoiceNo) %>% 
+  summarize(items = n(), avg_item = mean(UnitPrice), Total = sum(Quantity * UnitPrice)) %>% 
+  arrange(Total)
+```
+
+### Orders by customer
+
+```{r orders by customer}
+data %>% 
+  group_by(CustomerID) %>% 
+  summarize(orders = n(), avg_order = mean(Quantity * UnitPrice), Total = sum(Quantity * UnitPrice)) %>% 
+  arrange(Total)
+```
+
+### Orders by country
+
+```{r orders by country}
+data %>% 
+  group_by(Country) %>% 
+  summarize(orders = n(), avg_order = mean(Quantity * UnitPrice), Total = sum(Quantity * UnitPrice)) %>% 
+  arrange(Total)
+```
+
+### The period covered in the data
+
+```{r the period covered}
+data %>% 
+  summarize(start = min(InvoiceDate), end = max(InvoiceDate),
+            period = end - start)
+```
+
+### Take away notes:
+
+* Some total prices are negative.
+* The `InvoiceNo` format is not consistent.
+
+## Investigating pecularities
+
+### Negative totals
+
+For a total price to be negative, either the `Quantity` or the `UnitPrice` column is negative.
+And the reason why it is negative could be discounts, returns, cancellations, damages... etc.
+
+```{r Negative values summary}
+data %>% 
+  filter(Quantity < 0) %>% 
+  summarise(count =n())
+data %>% 
+  filter(UnitPrice < 0) %>% 
+  summarise(count = n())
+```
+
+Both columns have negative values. Investigating them further:
+
+```{r Negative unit prices}
+data %>% 
+  filter(UnitPrice < 0)
+```
+
+Two invoices descibed as "Adjust bad debt", these should be removed before analyzing the sales. Also note that the `InvoiceNo` starts with letter A.
+
+```{r Negative quantities}
+data %>% 
+  filter(Quantity < 0)
+```
+
+In the description column, some of these entries are described "Discount" and others just have the full product description. So, my earlier guess about discounts, returns, cancellations, or damages could be true.
+
+### Discounts
+
+Discounts naturally should be related to a specific sale, you don't give discounts on something unless you sell it, and naturally there should be a customer who benefited from the discounts.
+
+```{verifying discounts}
+#Cheking if any discount entries does not have a customer Id, if the result is empty tibble, then the discounts are verified
+data %>% 
+  filter(StockCode == "D", is.na(CustomerID))
+```
+
+Discounts are verified. Now, let's isolate them into a seperate table to further analyse them later.
+``` {r Discount variable}
+discounts <- data %>% 
+  filter(StockCode == "D") %>% 
+  mutate(InvoiceNo = str_sub(InvoiceNo, 2L, -1L))
+```
+
+I removed the "C" letter from the `InvoiceNo` because I suspect that this C is added to the `InvoiceNo` to which the discount was applied, and I want to check this by joining the discounts and data table on the `InvoiceNo` variable :
+
+```{r Checking C prefix}
+discounts %>% 
+  inner_join(data, by = "InvoiceNo")
+```
+
+The result is an empty table, meaning that my theory is wrong. Let's put back the prefix:
+
+```{r Discount variable modification}
+discounts <- data %>% 
+  filter(StockCode == "D")
+```
+
+## Different approach, through `StockCode`
+
+Looks like the `InvoiceNo` is not the key to understanding this dataset, let's try understanding the data through the `StockCode` instead.
+Seemingly, each product is given a unique Stock Code, comprising letters and numerals, but also, special transactions are given special codes. For example, discounts are given the `StockCode` "D". Maybe other types of transactions are given Stock codes that discribe them.
+
+So, since I wish to see the StockCodes that are not simply codes for specific products, displaying the unique codes wouldn't help, so I'm checking the lengths of the codes:
+
+```{r Stock code lengths summary}
+data %>%
+  group_by(StockCode_len = str_length(StockCode)) %>% 
+  summarize(n = n(), codes = length(unique(StockCode)))
+```
+
+The majority of Codes are 5 or 6 characters long, so it's safe to assume that these probably are the codes corresponding to actual products
+
+### One letter codes
+
+I will start by checking the one letter codes:
+```{r One letter codes}
+data %>% 
+  filter(str_length(StockCode) == 1) %>% 
+  summarize(codes = unique(StockCode))
+```
+
+There are 5 unique codes: D (we know is discount), M, S, B, and m (is it different from M?)
+
+What is M and m?
+
+```{r Checking M and m}
+data %>% 
+  filter(StockCode %in% c("M", "m")) %>% 
+  group_by(StockCode) %>% 
+  summarize(count = n(), total = sum(Quantity*UnitPrice))
+```
+And checking this one Invoice with code "m":
+
+```{r Checking m}
+data %>% 
+  filter(StockCode == "m")
+```
+
+Its description also says Manual, just like capital M. So, basically there's no difference.
+But what does Manual mean, is it expenses as manual labor? or manuals of devices sold separately? I can't tell because some of them have a negative cost and others positive.
+
+Next, what is S?
+
+```{r Checking S}
+data %>% 
+  filter(StockCode == "S")
+```
+
+Descirption says samples, let's just make sure they're samples given out:
+```{r Verifying samples}
+data %>% 
+  filter(StockCode == "S", Quantity*UnitPrice >= 0)
+```
+
+Just two curious invoices marked as samples but are positive revenue.
+
+Last one of the one letter group, What is B?
+```{r Checking B}
+data %>% 
+  filter(StockCode == "B")
+```
+
+Adjusting bad debt. Alright
+
+### Two letters Codes
+
+```{r Two letters code}
+data %>% 
+  filter(str_length(StockCode) == 2) %>% 
+  group_by(StockCode) %>% 
+  summarize(total = sum(Quantity*UnitPrice))
+```
+
+Some revenue described as Carriage. I don't think it means the product carriage.
+
+### Three letters code
+
+```{r Three letters code}
+data %>% 
+  filter(str_length(StockCode) == 3)
+```
+Described as Dotcom Postage, sounds like an expense but the first rows are all revenue. Let's see the total:
+
+```{r Dotcom postage total}
+data %>% 
+  filter(str_length(StockCode) == 3) %>% 
+  group_by(StockCode) %>% 
+  summarize(total = sum(Quantity*UnitPrice))
+```
+
+OVerall revenue, it looks!
+
+### Four letters codes
+
+```{r Four letters codes}
+data %>% 
+  filter(str_length(StockCode) == 4) %>% 
+  summarize(codes = unique(StockCode))
+```
+There are three of them: POST, PADS, CRUK. Checking one by one:
+
+```{r Checking POST}
+data %>% 
+  filter(StockCode == "POST")
+```
+Described as Postage, also strange seeing the first rows are revenue, let's check overall:
+```{r POST overall}
+data %>% 
+  filter(StockCode == "POST") %>% 
+  group_by(StockCode) %>% 
+  summarize(total = sum(Quantity*UnitPrice))
+```
+Also, the overall is revenue. That is strange!
+
+Next, what is PADS?
+
+```{r Checking PADS}
+data %>% 
+  filter(StockCode == "PADS") %>% select(Description)
+```
+The description is a bit strange: Pads to match all cushions! But literally just four entries contributing to less than a cent of revenue. Negligible.
+
+Next, What is CRUK?
+
+```{r Checking CRUK}
+data %>% 
+  filter(StockCode == "CRUK")
+```
+
+Described as "Crunk commision". Looks like an expense, making sure:
+```{CRUK summary}
+data %>% 
+  filter(StockCode == "CRUK") %>% 
+  group_by(StockCode) %>% 
+  summarize(total = sum(Quantity*UnitPrice))
+```
+
+Makes sense, but bad practice to just code it in the name of the person.
+
+As stated earlier, 5 and 6 letters long codes comprise the bulk of the data, so they are probably correspond with real products, so I'm skpping to 7 letters long codes.
+
+### Seven letters codes
+Some of them could still be real product codes
+```{r Checking seven letters codes}
+data %>% 
+  filter(str_length(StockCode) == 7) %>% 
+  summarize(codes = unique(StockCode))
+```
+
+Correct, all of them are regular product codes.
+
+### Eight letters codes
+```{r Checking eight letters codes}
+data %>% 
+  filter(str_length(StockCode) == 8) %>% 
+  summarize(codes = unique(StockCode))
+```
+They are also regular product codes.
+
+### Nine letters codes
+```{r Checking nine letters codes}
+data %>% 
+  filter(str_length(StockCode) == 9) %>% 
+  summarize(codes = unique(StockCode))
+```
+
+One is Amazon fee, and the other two look like regular product codes, let's check the amazon fee, expected to be expense.
+```{r Checking amazon fees}
+data %>% 
+  filter(StockCode == "AMAZONFEE") %>% 
+  group_by(StockCode) %>% 
+  summarize(count = n(), total = sum(Quantity*UnitPrice))
+```
+
+Correct, expenses.
+
+### Twelve letters codes
+```{r Checking twelve letters codes}
+data %>% 
+  filter(str_length(StockCode) == 12) %>% 
+  summarize(codes = unique(StockCode))
+```
+Bank charges and gifts, expected to be expenses, making sure:
+```{r verifying bank charges and gifts}
+data %>% 
+  filter(str_length(StockCode) == 12) %>% 
+  group_by(StockCode) %>% 
+  summarize(count = n(), total = sum(Quantity*UnitPrice))
+```
+The bank charges are expenses alright, but the gifts are revenue, meaning they're received gifts.
+
+
+
+
+There are no invoices marked as returns, so, either there were never any returned items, or they are entered some other way.
+
+```{r non product codes}
+#Creating a list of all non product codes for easy filtering:
+non_product_codes <- c("D", "M", "m", "B", "S", "C2", "DOT", "POST", "PADS",
+                       "CRUK", "AMAZONFEE", "BANK CHARGES", "gift_0001_40",
+                       "gift_0001_50", "gift_0001_30", "gift_0001_20",
+                       "gift_0001_10")
+```
+
+
+## Zero money
+
+While checking these codes, I encountered some invoices that had `Quantity` or `Unitprice` as 0, meaning, they do not contribute to any money at all. Let's see how many are those:
+
+```{r Checking zero money entries}
+data %>% 
+  filter(Quantity*UnitPrice == 0)
+```
+
+That is a lot. Let's save them and remove them from the data.
+```{r filtering out zero money}
+zero_money <- data %>% 
+  filter(Quantity*UnitPrice == 0)
+data <- data %>% 
+  filter(Quantity*UnitPrice != 0)
+```
+
+
+## Unaccounted for negative entries
+
+Now, let's see if there are still some negative sum transactions after filtering out non product stock codes:
+
+```{r Checking filtering groups}
+data %>% 
+  filter(!StockCode %in% non_product_codes, Quantity*UnitPrice < 0)
+```
+
+There are still a lot. Since these are not marked as discounts, samples, or giveaways, they probably are returns or damaged inventory.
+
+
+### Losses
+
+If an item was damaged while in inventory, it would be logical to not find any customer Id associated with it, and to enter it in the database as an expense. So, I'll filter these and save them as losses
+```{r Losses}
+losses <- data %>% 
+  filter(!StockCode %in% non_product_codes, Quantity*UnitPrice < 0,
+         is.na(CustomerID))
+```
+
+### Returns
+
+That leaves some negative cost invoices that have customer Ids and are not discounts. These are probably returns.
+```{r Returns}
+returns <- data %>% 
+  filter(!StockCode %in% non_product_codes, Quantity*UnitPrice < 0 
+         ,!is.na(CustomerID))
+```
+
+## Sales
+Now, finally, let's isolate the sales by excluding the zero money items, discounts, losses, and returns.
+```{r Sales}
+sales <- data %>%
+  filter(!StockCode %in% non_product_codes) %>% 
+  anti_join(zero_money) %>% 
+  anti_join(returns) %>% 
+  anti_join(losses)
+```
+
+# Analysis
+
+## Sales
+
+```{r Top 10 orders in revenue}
+sales %>%
+  filter(InvoiceNo %in%
+    c(sales %>% 
+    group_by(InvoiceNo) %>% 
+    summarize(total = sum(Quantity*UnitPrice)) %>% 
+    arrange(desc(total)) %>% 
+    top_n(10))$InvoiceNo)
+```
+
+```{r Top 10 customers}
+sales %>% 
+  group_by(CustomerID) %>% 
+  summarize(total = sum(Quantity*UnitPrice), orders = length(unique(InvoiceNo))) %>% 
+  arrange(desc(total), desc(orders)) %>% 
+  top_n(10)
+```
+
+
+Since this is online retails, let's check the distribution of sales across the day
+```{r Sales through out the day}
+sales %>% 
+  count(Hour, InvoiceNo) %>% 
+  ggplot(aes(x = Hour)) +
+  geom_histogram() +
+  xlim(min(sales$Hour), max(sales$Hour)) +
+  theme_classic()
+```
+
+Looks like most invoices get processed during the middle of the day.
+
+And through the week:
+```{r Sales through the week}
+sales %>% 
+  group_by(DayOfWeek, InvoiceNo) %>% 
+  group_by(DayOfWeek) %>% 
+  summarize(orders = n()) %>% 
+  ggplot(aes(x = DayOfWeek, y = orders)) +
+  geom_col() +
+  theme_classic()
+```
+
+Orders are evenly distributed across workdays, there's a dip on Sunday, and no orders on Saturday.
+
+What about the sales trend through the year?
+
+```{r Sales volume trend}
+sales %>% 
+  filter(InvoiceDate > (min(InvoiceDate) + 365)) %>% 
+  group_by(Month, InvoiceNo) %>% 
+  group_by(Month) %>% 
+  summarize(orders = n()) %>% 
+  ggplot(aes(x = Month, y = orders)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(sales$Month), max(sales$Month), by = 1)) +
+  theme_classic()
+```
+
+Sales started soaring in volume in September. But was that reflected in revenue?
+
+```{r Sales revenue trend}
+sales %>% 
+  filter(InvoiceDate > (min(InvoiceDate) + 365)) %>% 
+  group_by(Month, InvoiceNo) %>% 
+  group_by(Month) %>% 
+  summarize(total = sum(Quantity * UnitPrice)) %>% 
+  ggplot(aes(x = Month, y = total)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(sales$Month), max(sales$Month), by = 1)) +
+  theme_classic()
+```
+
+Yes, the same trend.
+
+Which countries have the highest orders?
+```{r Sales per country}
+sales %>% 
+  group_by(Country) %>% 
+  summarize(total = sum(Quantity * UnitPrice)) %>% 
+  ggplot(aes(area = total/1000000, fill = total/1000000, label = Country)) +
+  geom_treemap() +
+  geom_treemap_text()
+```
+
+## Discounts
+
+First note from understanding the data, the number of discounts is so small that it looks like the store doesn't give discounts at all. Here's the distribution on days:
+
+```{r Discount days}
+discounts %>% 
+  group_by(InvoiceDate) %>% 
+  summarize(n = n()) %>% 
+  arrange(desc(n))
+```
+There are no special days for discounts.
+
+And because of the way the discounts have been entered into the dataset, we can't determine if there is a special product that gets discounted a lot. Best we can do is group by unit price:
+
+```{r Discounts price range}
+discounts %>% 
+  group_by(UnitPrice) %>% 
+  summarize(n = n()) %>%  
+  arrange(desc(n))
+```
+Also looks like there is no specific price range that gets discounted a lot.
+
+## Returns
+Are there any problematic products that customers tend to return a lot?
+Let's see the rate of return for each product that has been returned, to see if there is any product that gets returned a lot. 
+
+```{r Products return rate}
+data %>% 
+  filter(!StockCode %in% non_product_codes) %>% 
+  mutate(state = ifelse(Quantity*UnitPrice > 0, "POSITIVE", "NEGATIVE")) %>% 
+  filter(state == "POSITIVE") %>% 
+  group_by(StockCode, state) %>% 
+  summarize(n = n()) %>% 
+  inner_join(data %>% 
+               filter(!StockCode %in% non_product_codes) %>% 
+               mutate(state = ifelse(Quantity*UnitPrice > 0, "POSITIVE",
+                                     "NEGATIVE")) %>% 
+               filter(state == "NEGATIVE") %>% 
+               group_by(StockCode, state) %>% 
+               summarize(n = n()),
+             by = "StockCode") %>% 
+  mutate(percentage_returned = (n.y/n.x)*100) %>% 
+  arrange(desc(percentage_returned))
+```
+Some products have return rate exceeding 100% by a lot, these obviously were sold in times prior to the earliest date in the dataset, and most of them have been sold few times.
+
+Let's check the products that get sold a lot and returned a lot, so that return rate would be meaningful.
+
+```{r Highly sold products return rate}
+#Sold more than a 100 times for example:
+
+data %>% 
+  filter(!StockCode %in% non_product_codes) %>% 
+  mutate(state = ifelse(Quantity*UnitPrice > 0, "POSITIVE", "NEGATIVE")) %>% 
+  filter(state == "POSITIVE") %>% 
+  group_by(StockCode, state) %>% 
+  summarize(n = n()) %>% 
+  filter(n > 100) %>% 
+  inner_join(data %>% 
+               filter(!StockCode %in% non_product_codes) %>% 
+               mutate(state = ifelse(Quantity*UnitPrice > 0, "POSITIVE",
+                                     "NEGATIVE")) %>% 
+               filter(state == "NEGATIVE") %>% 
+               group_by(StockCode, state) %>% 
+               summarize(n = n()),
+             by = "StockCode") %>% 
+  mutate(percentage_returned = (n.y/n.x)*100) %>% 
+  arrange(desc(percentage_returned))
+```
+
+# Conclusions
+
+1. The structure of the data is quite poor, for combining every transaction in the same table without clear markings. For example:
+  + Discounts have different and unlinked invoice numbers than the invoices they are applied to, allowing only overall aggregates and not on invoice level. They also have StockCode of D, Description "Discount", not allowing us to know if discounts are order based or product based. It's better to add a column called discount that holds the discount amounts for each invoice, and 0 for invoices that don't have any discounts.
+  + Returns have the same problem as discounts, but even worse, there is no clear marking that signify that these are actually returns, other than that their quantity are negative.
+  + There are a lot of other categories, some understandable, some aren't. I don't think adding all expenses to the invoices table is good practice. Storing them in another table would be better, or if necessary to have  everything in the same place, maybe adding a column to explain the type of transaction would be good.
+2. There are some zero cost invoices, not revenue nor expenses. These shouldn't exist, or if are data entry mistakes should be tracked down and corrected. Some of them are described as lost/damaged, these should be in negative balance.
+3. There are some unexplained negative balance invoices, regular products with regular stock codes and description, but the quantity negative and no customer Ids. These could be returns by unknown customers. But we can't know.
+4. Some invoices don't have Customer Ids, that could be understandable in case of regular retailers, where you do not necessarily take each customer's info, but how could that happen in online retail? Even if you don't take any info about the customer, you should generate a customer id with each order from different email.
+5. Online retail is supposed to bridge the time barrier of stores that don't operate 24/7, but what's the point of online retail if you'd just work same days and working hours of a regular store? I don't know why all the orders are confined within this time periods, and my guess is that the timestamp is for when the invoice was processed, not when the order was placed. And here, no info about the efficiency or speed of processing orders is provided. This process should be automized.
+6. Discounts seem a bit arbitrary, with no pattern for price range or time of year.
+7. Some of the heavily sold products have return rate reaching 10%, the storing conditions of these products should be checked.
+
+
+
+
