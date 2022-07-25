@@ -1,5 +1,5 @@
 # online-retail-eda
-Exploratory data analysis of online retail store data using R 
+Exploratory data analysis of Online retail store data using R 
 
 
 ## Data source
